@@ -1,0 +1,70 @@
+!pip install fairseq
+!pip install torch
+!pip install sentencepiece
+!pip install huggingface-hub
+from google.colab import drive
+drive.mount('/content/drive')
+import os
+import time
+import psutil
+import torchaudio
+from fairseq.checkpoint_utils import load_model_ensemble_and_task_from_hf_hub
+from fairseq.models.speech_to_text.hub_interface import S2THubInterface
+
+models, cfg, task = load_model_ensemble_and_task_from_hf_hub(
+    "facebook/xm_transformer_600m-en_ru-multi_domain",
+    arg_overrides={"config_yaml": "config.yaml"},
+)
+model = models[0]
+generator = task.build_generator(models, cfg)
+chunk_duration = 30
+audio_folder = '/content/drive/MyDrive/Ted'
+all_files = os.listdir(audio_folder)
+audio_files = [filename for filename in all_files if filename.endswith((".wav", ".flac", ".mp3"))]
+
+for audio_file in audio_files:
+    #Get CPU usage and memory consumption before loading audio file
+    cpu_percent_start = psutil.cpu_percent()
+    memory_mb_start = psutil.virtual_memory().used / 1e6
+
+    try:
+        audio, sample_rate = torchaudio.load(os.path.join(audio_folder, audio_file))
+
+        audio_duration = audio.shape[-1] / float(sample_rate)
+        if audio_duration <= 40:
+            start_time = time.time()
+            sample = S2THubInterface.get_model_input(task, audio)
+            text = S2THubInterface.get_prediction(task, model, generator, sample)
+            end_time = time.time()
+            latency_ms = (end_time - start_time) * 1000
+
+            #Get CPU usage and memory consumption
+            cpu_percent = psutil.cpu_percent()
+            memory_mb = psutil.virtual_memory().used / 1e6
+
+            print(f"Translation of {audio_file}: {text}")
+            print(f"Latency for audio file {audio_file}: {latency_ms/1000:.2f} seconds")
+            print(f"CPU usage for audio file {audio_file}: {cpu_percent:.2f}%")
+            print(f"Memory consumption for audio file {audio_file}: {memory_mb:.2f} MB")
+
+        else:
+            num_chunks = int(audio_duration / chunk_duration) + 1
+            chunks = [audio[:, i * sample_rate * chunk_duration: (i+1) * sample_rate * chunk_duration] for i in range(num_chunks)]
+
+            translation_ru = ""
+            latency_ms_total = 0
+            for chunk in chunks:
+                sample = S2THubInterface.get_model_input(task, chunk)
+                start_time = time.time()
+                text_chunk = S2THubInterface.get_prediction(task, model, generator, sample)
+                end_time = time.time()
+
+                latency_ms = (end_time - start_time) * 1000
+                latency_ms_total += latency_ms
+                translation_ru += text_chunk + " "
+
+            print(f"Total latency: {latency_ms_total/1000:.2f} seconds")
+            print(f"Translation of {audio_file}: {translation_ru}")
+
+    except Exception as e:
+        print(f"Error processing {audio_file}: {e}")
